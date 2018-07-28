@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'WAF Sampler'
+
+Parameters:
+
+  envParam:
+    Type: String
+    Default: 'dev'
+    AllowedValues: [ 'dev', 'test', 'acc', 'prod' ]
+    Description: 'Select the WAF Sampler environment role'
+
+  scheduleInterval:
+    Type: Number
+    Default: 10
+    AllowedValues: [ 5, 10, 15, 20, 30 ]
+    Description: 'Specify the schedule interval'
+
+  archivePeriod:
+    Type: Number
+    Default: 60
+    MinValue: 0
+    Description: 'Specify the time after which the sampled logs will be archived to Glacier. Specify 0 to not archive to Glacier.'
+
+  retentionPeriod:
+    Type: Number
+    Default: 1825
+    MinValue: 0
+    Description: 'Specify the time after which the sampled logs will be deleted. Specify 0 to not delete ever.'
+
+Conditions:
+
+  archiveSamples: !Not [ !Equals [ !Ref archivePeriod, 0 ] ]
+  deleteSamples: !Not [ !Equals [ !Ref retentionPeriod, 0 ] ]
+
+Resources:
+
+# ==================================== #
+# S3 Bucket
+# ==================================== #
+
+  WafSamples:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub 'waf-sampler-${envParam}-samples-${AWS::AccountId}'
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'archive'
+            Status: !If [ archiveSamples, 'Enabled', 'Disabled' ]
+            Transitions:
+              - StorageClass: 'GLACIER'
+                TransitionInDays: !Ref archivePeriod
+          - Id: 'delete'
+            Status: !If [ deleteSamples, 'Enabled', 'Disabled' ]
+            ExpirationInDays: !Ref retentionPeriod
+      Tags:
+        - Key: 'Application'
+          Value: 'waf-sampler'
+        - Key: 'Environment'
+          Value: !Sub '${envParam}'
+
+# ==================================== #
+# Lambda stuff
+# ==================================== #
+
+  WafSamplerRole:
+    Type: 'AWS::IAM::Role'
+    DependsOn: WafSamples
+    Properties:
+      RoleName: !Sub 'waf-sampler-${envParam}-lambda-role-${AWS::Region}'
+      Path: '/'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 'lambda.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+      - PolicyName: 'root'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: 'Allow'
+            Action:
+              - 'waf:GetSampledRequests'
+            Resource:
+              - 'arn:aws:waf::*:rule/*'
+              - 'arn:aws:waf::*:webacl/*'
+          - Effect: 'Allow'
+            Action:
+              - 'waf:ListRules'
+              - 'waf:ListWebACLs'
+              - 'waf:GetWebACL'
+            Resource: '*'
+          - Effect: 'Allow'
+            Action:
+              - 's3:PutObject'
+            Resource: !Sub
+                        - '${s3Arn}/*'
+                        - s3Arn: !GetAtt WafSamples.Arn
+
+  WafSampler:
+    Type: 'AWS::Lambda::Function'
+    DependsOn: WafSamplerRole
+    Properties:
+      FunctionName: !Sub 'waf-sampler-${envParam}'
+      Description: 'Function storing waf sampled requests in S3'
+      Environment:
+        Variables:
+          interval: !Sub '${scheduleInterval}'
+          bucketName: !Ref WafSamples
+      Runtime: 'python2.7'
+      Handler: 'index.handler'
+      Code:
+        ZipFile: !Sub |
+          import os
+          import json
+          import boto3
+          import datetime
+
+          interval = os.environ['interval']
+          bucketName = os.environ['bucketName']
+
+          waf = boto3.client('waf')
+          bucket = boto3.resource('s3').Bucket(bucketName)
+
+          def handler(event, context):
+
+              end = getTimestamp()
+              start = end - datetime.timedelta(minutes=int(interval))
+
+              ruleIds = {}
+              rules = waf.list_rules()
+              for rule in rules['Rules']:
+                  ruleIds[rule['RuleId']] = rule['Name']
+
+              acls = waf.list_web_acls()
+              for acl in acls['WebACLs']:
+
+                  webAcl = waf.get_web_acl( WebACLId = acl['WebACLId'] )['WebACL']
+                  webAclId = webAcl['WebACLId']
+
+                  blocked = []
+                  for rule in webAcl['Rules']:
+
+                      lines = sampleBlocked(
+                                      webAclId,
+                                      webAcl['Name'],
+                                      rule['RuleId'],
+                                      ruleIds[rule['RuleId']],
+                                      start,
+                                      end
+                              )
+                      blocked.extend(lines)
+
+                  print('{}: {} blocked sampled requests'.format(webAclId, len(blocked)))
+                  if blocked:
+                      save(webAclId, start, blocked)
+
+              return 0
+
+          def sampleBlocked(webAclId, webAclName, ruleId, ruleName, start, end):
+
+              samples = waf.get_sampled_requests(
+                          WebAclId=webAclId,
+                          RuleId=ruleId,
+                          TimeWindow={
+                              'StartTime': start,
+                              'EndTime': end
+                          },
+                          MaxItems=500
+                      )
+
+              lines = []
+
+              for sample in samples['SampledRequests']:
+                  if sample['Action'] == 'BLOCK':
+
+                      request = {
+                          'timestamp': sample['Timestamp'],
+                          'action': sample['Action'],
+                          'web-acl-id': webAclId,
+                          'web-acl-name': webAclName,
+                          'rule-id': ruleId,
+                          'rule-name': ruleName,
+                          'client-ip': sample['Request']['ClientIP'],
+                          'country': sample['Request']['Country'],
+                          'method': sample['Request']['Method'],
+                          'uri': sample['Request']['URI'],
+                          'http-version': sample['Request']['HTTPVersion'],
+                          'headers': {}
+                      }
+                      for header in sample['Request']['Headers']:
+                          request['headers'][header['Name'].lower()] = header['Value']
+
+                      lines.append(json.dumps(request, default=str))
+
+              return lines
+
+          def getTimestamp():
+
+              timestamp = datetime.datetime.now()
+              return timestamp.replace(
+                          minute = timestamp.time().minute - (timestamp.time().minute%int(interval)),
+                          second = 0,
+                          microsecond = 0
+                          )
+
+          def save(webAclId, timestamp, lines):
+
+              key = 'waf/blocked/{}/sample-requests-{}.json'.format(
+                              webAclId,
+                              timestamp.strftime("%Y-%m-%d-%H-%M-%S")
+                          )
+
+              bucket.put_object(
+                  Key=key,
+                  ContentType='application/json',
+                  Body='\n'.join(lines)
+                  )
+      Timeout: 300
+      MemorySize: 128
+      Role: !GetAtt WafSamplerRole.Arn
+      Tags:
+        - Key: 'Application'
+          Value: 'waf-sampler'
+        - Key: 'Environment'
+          Value: !Sub '${envParam}'
+
+
+  WafSamplerPermission:
+    Type: 'AWS::Lambda::Permission'
+    DependsOn:
+      - WafSampler
+      - WafSamplerSchedule
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Sub 'waf-sampler-${envParam}'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt WafSamplerSchedule.Arn
+
+
+# ==================================== #
+# CloudWatch
+# ==================================== #
+
+  WafSamplerSchedule:
+    Type: 'AWS::Events::Rule'
+    DependsOn: WafSampler
+    Properties:
+      Name: !Sub 'waf-sampler-${envParam}-lambda-schedule'
+      Description: 'Scheduled event for invocation of WAF Sampler function'
+      ScheduleExpression: !Sub 'rate(${scheduleInterval} minutes)'
+      State: 'ENABLED'
+      Targets:
+        - Id: !Sub 'waf-sampler-${envParam}-lambda-target'
+          Arn: !GetAtt WafSampler.Arn
+
+  WafSamplerLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Join [ '', [ '/aws/lambda/', !Ref WafSampler ] ]
+      RetentionInDays: 1
+
+

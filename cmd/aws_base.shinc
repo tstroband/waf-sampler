@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+
+function parseArgs() {
+
+    paramKeys=()
+    paramVals=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -h)
+                usage
+                ;;
+            -stack=*)
+                stack="${1#*=}"
+                ;;
+            -connect=*)
+                connect="${1#*=}"
+                ;;
+            -protect=*)
+                protect="${1#*=}"
+                ;;
+            -env=*)
+                env="${1#*=}"
+                paramKeys+=("envParam")
+                paramVals+=("${1#*=}")
+                ;;
+            -profile=*)
+                profile="${1#*=}"
+                ;;
+            -exec=*)
+                exec="${1#*=}"
+                ;;
+            *)
+                tmp="${1%=*}"
+                paramKeys+=("${tmp:1}")
+                paramVals+=("${1#*=}")
+                ;;
+        esac
+        if [ $? -ne 0 ]; then
+            exit 1
+        fi
+        shift
+    done
+
+    if [ -z ${profile+x} ]; then
+        profile=default
+    fi
+
+    if [ -z ${exec+x} ]; then
+        exec=true
+    fi
+
+    if [ -z ${env+x} ]; then
+        echo "error: 'env' parameter must be specified"
+        usage
+    fi
+}
+
+function buildCfParams() {
+    cfParams=""
+    for i in ${!paramKeys[@]}
+    do
+        cfParams="${cfParams} ParameterKey=${paramKeys[$i]},ParameterValue=${paramVals[$i]}"
+    done
+}
+
+function selectProfile() {
+    export AWS_PROFILE=$profile
+
+    echo ===================================================================================
+    echo AWS Cli: $(aws --version)
+    echo Profile: $AWS_PROFILE
+    echo Role: $(aws sts get-caller-identity --query 'Arn' --output text)
+    echo ===================================================================================
+}
+
+function createStack() {
+    # 1. stack
+    # 2. stackName
+    # 3. env
+    # 4. app
+    # 5. cfParams
+
+    if [ $3 = "prod" ]; then
+        protection="enable-termination-protection"
+    else
+        protection="no-enable-termination-protection"
+    fi
+
+    echo "Creating $2"
+
+    aws cloudformation create-stack \
+        --stack-name $2 \
+        --template-body file://./../cloudformation/$1.yml \
+        --parameters $5 \
+        --on-failure DELETE \
+        --capabilities CAPABILITY_NAMED_IAM \
+        --tags Key=Application,Value=$4 Key=Environment,Value=$3 \
+        --$protection
+
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+    echo "waiting to complete..."
+
+    aws cloudformation wait stack-create-complete \
+        --stack-name $2
+
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+
+    return 0
+}
+
+
+function updateStack() {
+    # 1. stack
+    # 2. stackName
+    # 3. env
+    # 4. app
+    # 5. cfParams
+    # 6. exec
+
+    changeSet=changeset-$2-$(date +%s)
+    echo "Creating $changeSet"
+
+    aws cloudformation create-change-set \
+        --stack-name $2 \
+        --change-set-name $changeSet \
+        --change-set-type UPDATE \
+        --template-body file://./../cloudformation/$1.yml \
+        --parameters $5 \
+        --capabilities CAPABILITY_NAMED_IAM \
+        --tags Key=Application,Value=$4 Key=Environment,Value=$3
+
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+    echo "waiting to complete..."
+
+    aws cloudformation wait change-set-create-complete \
+        --stack-name $2 \
+        --change-set-name $changeSet
+
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+
+    if [[ "$6" = "true" ]] ; then
+        echo "Executing change-set $changeSet"
+
+        aws cloudformation execute-change-set \
+            --stack-name $2 \
+            --change-set-name $changeSet
+
+        echo "waiting to complete..."
+
+        aws cloudformation wait stack-update-complete \
+            --stack-name $2
+    fi
+
+    return 0
+}
+
+function deleteStack() {
+    # 1. stack
+    # 2. stackName
+    # 3. env
+    # 4. app
+
+    echo "Deleting $2"
+
+    aws cloudformation delete-stack \
+        --stack-name $2 \
+
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+    echo "waiting to complete..."
+
+    aws cloudformation wait stack-delete-complete \
+        --stack-name $2
+
+    if [ $? -ne 0 ]; then
+        exit 1
+    fi
+
+    return 0
+}
+
+if [ "$#" -eq 0 ] ; then
+    echo "Error: invalid number of arguments"
+    usage
+fi
+
+parseArgs $@
+
+selectProfile
