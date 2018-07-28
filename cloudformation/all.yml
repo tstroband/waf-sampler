@@ -27,6 +27,13 @@ Parameters:
     MinValue: 0
     Description: 'Specify the time after which the sampled logs will be deleted. Specify 0 to not delete ever.'
 
+  flattenEntries:
+    Type: String
+    Default: 'false'
+    AllowedValues: [ 'true',  'false' ]
+    Description: 'Specify if the JSON entries headers-structure should be flattened.'
+
+
 Conditions:
 
   archiveSamples: !Not [ !Equals [ !Ref archivePeriod, 0 ] ]
@@ -114,6 +121,7 @@ Resources:
         Variables:
           interval: !Sub '${scheduleInterval}'
           bucketName: !Ref WafSamples
+          flattenEntries: !Ref flattenEntries
       Runtime: 'python2.7'
       Handler: 'index.handler'
       Code:
@@ -123,31 +131,43 @@ Resources:
           import boto3
           import datetime
 
+          # get the environment parameters
           interval = os.environ['interval']
           bucketName = os.environ['bucketName']
+          flattenEntries = os.environ['flattenEntries']
 
+          # initialize the clients
           waf = boto3.client('waf')
           bucket = boto3.resource('s3').Bucket(bucketName)
 
+          # main handler routine
           def handler(event, context):
 
+              # get the timestamp and determine the period
               end = getTimestamp()
               start = end - datetime.timedelta(minutes=int(interval))
 
+              # capture the rule-ids and their corresponding names
               ruleIds = {}
               rules = waf.list_rules()
               for rule in rules['Rules']:
                   ruleIds[rule['RuleId']] = rule['Name']
 
+              # iterate over all web acls
               acls = waf.list_web_acls()
               for acl in acls['WebACLs']:
 
-                  webAcl = waf.get_web_acl( WebACLId = acl['WebACLId'] )['WebACL']
-                  webAclId = webAcl['WebACLId']
+                  # get the ACL metadata
+                  webAclId = acl['WebACLId']
+                  webAcl = waf.get_web_acl( WebACLId = webAclId )['WebACL']
 
+                  # blocked will hold all blocked antries for this acl
                   blocked = []
+
+                  # iterate over all rules
                   for rule in webAcl['Rules']:
 
+                      # get the blocked entries
                       lines = sampleBlocked(
                                       webAclId,
                                       webAcl['Name'],
@@ -156,10 +176,15 @@ Resources:
                                       start,
                                       end
                               )
+                      # and append them to the 'blocked' array
                       blocked.extend(lines)
 
+                  # debug output to CloudWatch logs
                   print('{}: {} blocked sampled requests'.format(webAclId, len(blocked)))
+
+                  # if any blocked entries
                   if blocked:
+                      # save them to S3
                       save(webAclId, start, blocked)
 
               return 0
@@ -192,11 +217,16 @@ Resources:
                           'country': sample['Request']['Country'],
                           'method': sample['Request']['Method'],
                           'uri': sample['Request']['URI'],
-                          'http-version': sample['Request']['HTTPVersion'],
-                          'headers': {}
+                          'http-version': sample['Request']['HTTPVersion']
                       }
-                      for header in sample['Request']['Headers']:
-                          request['headers'][header['Name'].lower()] = header['Value']
+
+                      if flattenEntries == 'true':
+                        for header in sample['Request']['Headers']:
+                            request[header['Name'].lower()] = header['Value']
+                      else:
+                        request['headers'] = {}
+                        for header in sample['Request']['Headers']:
+                            request['headers'][header['Name'].lower()] = header['Value']
 
                       lines.append(json.dumps(request, default=str))
 

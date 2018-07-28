@@ -43,13 +43,16 @@ Each line entry contain the following information:
     "accept-language": "en-US,en;q=0.9,nl;q=0.8",
     "accept-encoding": "gzip, deflate, br",
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.99 Safari/537.36",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_5) AppleWebKit/537.36 (KHTML, like Gecko) etc. etc.",
     "host": "forum.mydomain.com",
     "cache-control": "max-age=0",
     "upgrade-insecure-requests": "1"
   }
 }
 ```
+
+**Note:** If you set the parameter `flattenEntries` to `true` then the `headers` structure will be flattened, resulting
+ in the children to be appended to the root. For some log aggregation platforms that may be better.
 
 The following sections discuss how to provision and decommission this stack.
 
