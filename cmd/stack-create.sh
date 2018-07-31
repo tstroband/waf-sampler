@@ -31,6 +31,6 @@ fi
 stackName=$stack
 app=$stack
 
-createStack $stack $stackName $protect $app $cfParams
+createStack $stack $stackName $protect $app "$cfParams"
 
 echo "done!"

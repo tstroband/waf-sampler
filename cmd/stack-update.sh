@@ -30,6 +30,6 @@ fi
 stackName=$stack
 app=$stack
 
-updateStack $stack $stackName $app $cfParams $exec
+updateStack $stack $stackName $app "$cfParams" $exec
 
 echo "done!"
