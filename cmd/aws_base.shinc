@@ -19,11 +19,6 @@ function parseArgs() {
             -protect=*)
                 protect="${1#*=}"
                 ;;
-            -env=*)
-                env="${1#*=}"
-                paramKeys+=("envParam")
-                paramVals+=("${1#*=}")
-                ;;
             -profile=*)
                 profile="${1#*=}"
                 ;;
@@ -43,17 +38,14 @@ function parseArgs() {
     done
 
     if [ -z ${profile+x} ]; then
-        profile=default
+        echo "error: 'profile' parameter must be specified"
+        usage
     fi
 
     if [ -z ${exec+x} ]; then
         exec=true
     fi
 
-    if [ -z ${env+x} ]; then
-        echo "error: 'env' parameter must be specified"
-        usage
-    fi
 }
 
 function buildCfParams() {
@@ -77,11 +69,11 @@ function selectProfile() {
 function createStack() {
     # 1. stack
     # 2. stackName
-    # 3. env
+    # 3. protect
     # 4. app
     # 5. cfParams
 
-    if [ $3 = "prod" ]; then
+    if [ $3 = "true" ]; then
         protection="enable-termination-protection"
     else
         protection="no-enable-termination-protection"
@@ -95,7 +87,7 @@ function createStack() {
         --parameters $5 \
         --on-failure DELETE \
         --capabilities CAPABILITY_NAMED_IAM \
-        --tags Key=Application,Value=$4 Key=Environment,Value=$3 \
+        --tags Key=Application,Value=$4 \
         --$protection
 
     if [ $? -ne 0 ]; then
@@ -117,10 +109,9 @@ function createStack() {
 function updateStack() {
     # 1. stack
     # 2. stackName
-    # 3. env
-    # 4. app
-    # 5. cfParams
-    # 6. exec
+    # 3. app
+    # 4. cfParams
+    # 5. exec
 
     changeSet=changeset-$2-$(date +%s)
     echo "Creating $changeSet"
@@ -130,9 +121,9 @@ function updateStack() {
         --change-set-name $changeSet \
         --change-set-type UPDATE \
         --template-body file://./../cloudformation/$1.yml \
-        --parameters $5 \
+        --parameters $4 \
         --capabilities CAPABILITY_NAMED_IAM \
-        --tags Key=Application,Value=$4 Key=Environment,Value=$3
+        --tags Key=Application,Value=$3
 
     if [ $? -ne 0 ]; then
         exit 1
@@ -147,7 +138,7 @@ function updateStack() {
         exit 1
     fi
 
-    if [[ "$6" = "true" ]] ; then
+    if [[ "$5" = "true" ]] ; then
         echo "Executing change-set $changeSet"
 
         aws cloudformation execute-change-set \
@@ -166,8 +157,6 @@ function updateStack() {
 function deleteStack() {
     # 1. stack
     # 2. stackName
-    # 3. env
-    # 4. app
 
     echo "Deleting $2"
 

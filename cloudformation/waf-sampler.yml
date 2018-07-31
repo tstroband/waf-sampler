@@ -3,12 +3,6 @@ Description: 'WAF Sampler'
 
 Parameters:
 
-  envParam:
-    Type: String
-    Default: 'dev'
-    AllowedValues: [ 'dev', 'test', 'acc', 'prod' ]
-    Description: 'Select the WAF Sampler environment role'
-
   scheduleInterval:
     Type: Number
     Default: 10
@@ -33,6 +27,10 @@ Parameters:
     AllowedValues: [ 'true',  'false' ]
     Description: 'Specify if the JSON entries headers-structure should be flattened.'
 
+  adminEmail:
+    Type: String
+    Default: ''
+    Description: 'Specify the administrative email address that will receive notifications of failed invocations.'
 
 Conditions:
 
@@ -49,7 +47,7 @@ Resources:
     Type: 'AWS::S3::Bucket'
     DeletionPolicy: Retain
     Properties:
-      BucketName: !Sub 'waf-sampler-${envParam}-samples-${AWS::AccountId}'
+      BucketName: !Sub 'waf-sampler-${AWS::AccountId}'
       AccessControl: Private
       LifecycleConfiguration:
         Rules:
@@ -64,8 +62,6 @@ Resources:
       Tags:
         - Key: 'Application'
           Value: 'waf-sampler'
-        - Key: 'Environment'
-          Value: !Sub '${envParam}'
 
 # ==================================== #
 # Lambda stuff
@@ -75,7 +71,7 @@ Resources:
     Type: 'AWS::IAM::Role'
     DependsOn: WafSamples
     Properties:
-      RoleName: !Sub 'waf-sampler-${envParam}-lambda-role-${AWS::Region}'
+      RoleName: !Sub 'waf-sampler-lambda-role-${AWS::Region}'
       Path: '/'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -115,7 +111,7 @@ Resources:
     Type: 'AWS::Lambda::Function'
     DependsOn: WafSamplerRole
     Properties:
-      FunctionName: !Sub 'waf-sampler-${envParam}'
+      FunctionName: 'waf-sampler'
       Description: 'Function storing waf sampled requests in S3'
       Environment:
         Variables:
@@ -222,7 +218,7 @@ Resources:
 
                       if flattenEntries == 'true':
                         for header in sample['Request']['Headers']:
-                            request[header['Name'].lower()] = header['Value']
+                            request['header-' + header['Name'].lower()] = header['Value']
                       else:
                         request['headers'] = {}
                         for header in sample['Request']['Headers']:
@@ -259,9 +255,6 @@ Resources:
       Tags:
         - Key: 'Application'
           Value: 'waf-sampler'
-        - Key: 'Environment'
-          Value: !Sub '${envParam}'
-
 
   WafSamplerPermission:
     Type: 'AWS::Lambda::Permission'
@@ -270,10 +263,35 @@ Resources:
       - WafSamplerSchedule
     Properties:
       Action: 'lambda:InvokeFunction'
-      FunctionName: !Sub 'waf-sampler-${envParam}'
+      FunctionName: 'waf-sampler'
       Principal: 'events.amazonaws.com'
       SourceArn: !GetAtt WafSamplerSchedule.Arn
 
+# ==================================== #
+# Failed Invocations
+# ==================================== #
+
+  FailedInvocationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: 'waf-sampler-failed-invocations'
+      DisplayName: 'Failed invocations of WAF Sampler'
+      Subscription:
+        - Protocol: 'email'
+          Endpoint: !Ref adminEmail
+
+
+#  FailedInvocationAlarm:
+#    Type: 'AWS::CloudWatch::Alarm'
+#    Properties:
+#      AlarmDescription: 'Alarm for failed invocations of WAF Sampler'
+#      AlarmActions:
+#        - !Ref FailedInvocationTopic
+#      MetricName: ''
+#      Namespace: ''
+#      Statistic: ''
+#      Period:
+#      ComparisonOperator: 'GreaterThanThreshold'
 
 # ==================================== #
 # CloudWatch
@@ -283,12 +301,12 @@ Resources:
     Type: 'AWS::Events::Rule'
     DependsOn: WafSampler
     Properties:
-      Name: !Sub 'waf-sampler-${envParam}-lambda-schedule'
+      Name: 'waf-sampler-schedule'
       Description: 'Scheduled event for invocation of WAF Sampler function'
       ScheduleExpression: !Sub 'rate(${scheduleInterval} minutes)'
       State: 'ENABLED'
       Targets:
-        - Id: !Sub 'waf-sampler-${envParam}-lambda-target'
+        - Id: 'waf-sampler'
           Arn: !GetAtt WafSampler.Arn
 
   WafSamplerLogGroup:

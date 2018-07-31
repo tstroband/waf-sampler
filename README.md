@@ -1,19 +1,18 @@
 # AWS WAF Sampler
 
-Welcome to the AWS WAF Sampler project. AWS WAF is a pretty cool Web Application Firewall that can be used to protect
-your applications against DDOS attacks and malicious requests.
-
-Unfortunately it does not let you log, store and analyze blocked requests. Instead it offers the capability to take
-'samples' of blocked requests from the last 3 hours. Either through the API or through the console.
+AWS WAF is a pretty cool Web Application Firewall that can be used to protect
+your applications against DDOS attacks and malicious requests. Unfortunately it does not let you log, store and analyze
+blocked requests. Instead it offers the capability to take 'samples' of blocked requests from the last 3 hours. Either
+through the API or through the console.
 
 As you probably have better things to than staring at your screen waiting for blocked requests here's a small
-_serverless_ little app that automates the lot. This repository contains a CloudFormation template that lets you
-provision a simple lambda function and S3 bucket to periodically get those 'samples' and store them in S3 for
+_serverless_ little app that automates the whoel thing. This repository contains a CloudFormation template that lets
+you provision a simple lambda function and S3 bucket to periodically get those 'samples' and store them in S3 for
 future reference (compliance).
 
 The stack takes a `scheduleInterval` parameter which defines the interval for getting the samples. Every invocation it
 iterates over all WebACLs in your AWS account and for each WebACL iterates over all rules to get the `Blocked` samples
-for the preceding period. If any, it saves them to a file in the S3 bucket using the following key pattern:
+for the **preceding** period. If any, it saves them to a file in the S3 bucket using the following key pattern:
 `waf/blocked/<webacl-id>/<yyyy-MM-dd-HH-mm-ss>.json`
 
 For example:
@@ -58,7 +57,8 @@ The following sections discuss how to provision and decommission this stack.
 
 1. Preparation
 2. Provisioning
-3. Decommissioning
+3. Updating
+4. Decommissioning
 
 ## Preparation
 
@@ -75,7 +75,7 @@ To setup your main account profile, edit the file `~/.aws/credentials` and add t
 [my-profile]
 aws_access_key_id = AKIA****************
 aws_secret_access_key = aLs8i9Fr********************************
-aws_arn_mfa = arn:aws:iam::***********:mfa/**********
+mfa_serial = arn:aws:iam::***********:mfa/**********
 region = eu-west-1
 output = json
 ```
@@ -98,38 +98,65 @@ Detailed information on how to clone this repository can be found here:
 [GitHub Help - Cloning a repository](https://help.github.com/articles/cloning-a-repository/) 
 
 ## Provisioning
-The WAF Sampler app is setup by executing the following steps:
-
-
-### Step 1 - Set defaults
-
-In the directory `cmd`, edit the file `defaults.shinc` and change the following values:
-
-| Parameter | Description |
-| --------- | ------------|
-| `profile` | The AWS profile to use. This value should match the profile name you want to use. For instance `my-profile` |
-
-
-### Step 2 - Create the stack
+The WAF Sampler app is setup by provisioning the CloudFormation stack defined in `cloudformation/waf-sampler.yml`.
 This stack provisions the entire application and all related resources. More specifically it creates the following:
 
-1. The S3 bucket to hold the sampled logs: `waf-sampler-<env>-<account-id>`
-2. The Lambda function that takes the samples and writes them to the bucket: `waf-sampler-<env>`
-3. The CloudWatch log group to hold the Lambda debug log output: `/aws/lambda/waf-sampler-<env>`
-4. The CloudWatch scheduled event to trigger the Lambda: `waf-sampler-<env>-lambda-schedule`
+This stack provisions the entire application and all related resources. More specifically it creates the following:
+
+1. The S3 bucket to hold the sampled logs: `waf-sampler-<account-id>`
+2. The Lambda function that takes the samples and writes them to the bucket: `waf-sampler`
+3. The CloudWatch log group to hold the Lambda debug log output: `/aws/lambda/waf-sampler`
+4. The CloudWatch scheduled event to trigger the Lambda: `waf-sampler-lambda-schedule`
+5. The SNS topic to receive notifications of failed invocations: `waf-sampler-failed-invocations`
+6. The CloudWatch alarm to notify the SNS topic of failed invocations
 
 To create this stack, execute the following command from the directory `cmd`:
 ```
-$ ./stack-create.sh -env=prod -stack=all -scheduledInterval=10 -archivePeriod=60 -retentionPeriod=365 [-<paramName>=<paramValue>]*
+$ ./stack-create.sh -stack=waf-sampler -profile=<profile> -adminEmail=<admin-email> -scheduledInterval=10 -archivePeriod=60 -retentionPeriod=365 [-<paramName>=<paramValue>]*
 ```
 Several parameters can be appended in the form of `-paramName=paramValue`. The following parameters are supported:
 
 | Parameter | Default | Description |
 | --------- | ------- | ------------|
-| `env` |  | This parameter indicates the environment of the application itself. Valid values are `dev`, `test`, `acc` and `prod`. |
-| `profile` | value from `defaults.shinc` | The AWS profile to use. |
-| `scheduleInterval` | `10` | The schedule interval in minutes. Valid values are `5`, `10`, `15`, `20` and `30. |
+| `profile` | `default` | The AWS profile to use. |
+| `adminEmail` |  | The email address to receive notifications of failed invocations. A valid email address. **Don't forget to confirm the subscription!** |
+| `scheduleInterval` | `10` | The schedule interval in minutes. Valid values are `5`, `10`, `15`, `20` and `30`. |
 | `archivePeriod` | `60` (two months) | The time in days after which the sample logs will be moved to Glacier. Specify `0` to not archive to Glacier. |
 | `retentionPeriod` | `1825` (5 years) | The time in days after which the sample logs will be deleted. Specify `0` to never delete. |
+| `flattenEntries` | `false` | Removes the 'headers' node and prefixes each child with `header-`. Allowed values: `true` or `false`. |
 
 
+## Updating
+ To alter the created WAF Sampler stack you can execute the following command from the directory `cmd`:
+```
+$ ./stack-update.sh -stack=waf-sampler -profile=<profile> -exec=<exec> -adminEmail=<admin-email> -scheduledInterval=10 -archivePeriod=60 -retentionPeriod=365 [-<paramName>=<paramValue>]*
+```
+Several parameters can be appended in the form of `-paramName=paramValue`. The following parameters are supported:
+
+| Parameter | Default | Description |
+| --------- | ------- | ------------|
+| `profile` | `default` | The AWS profile to use. |
+| `exec` | `true` | Executes the created change-set immediately. If set to false it just creates the change-set, allowing you to review it and execute it manually through the API or console. Valid values are `true` or `false`. |
+| `adminEmail` |  | The email address to receive notifications of failed invocations. A valid email address. **Don't forget to confirm the subscription!** |
+| `scheduleInterval` | `10` | The schedule interval in minutes. Valid values are `5`, `10`, `15`, `20` and `30`. |
+| `archivePeriod` | `60` (two months) | The time in days after which the sample logs will be moved to Glacier. Specify `0` to not archive to Glacier. |
+| `retentionPeriod` | `1825` (5 years) | The time in days after which the sample logs will be deleted. Specify `0` to never delete. |
+| `flattenEntries` | `false` | Removes the 'headers' node and prefixes each child with `header-`. Allowed values: `true` or `false`. |
+
+**Note:** if you just want to change the email address you can also create a new subscription directly through the
+console. 
+
+## Decommissioning
+To delete the WAF Sampler app stack you can execute the following command from the directory `cmd`:
+```
+$ ./stack-delete.sh -stack=waf-sampler -profile=<profile>
+```
+Several parameters can be appended in the form of `-paramName=paramValue`. The following parameters are supported:
+
+| Parameter | Default | Description |
+| --------- | ------- | ------------|
+| `profile` | `default` | The AWS profile to use. |
+
+After deleting the stack the following resources remain and have to be manually deleted:
+
+1. The S3 bucket `waf-sampler-<account-id>`

@@ -19,7 +19,6 @@ function usage() {
     exit 1
 }
 
-source defaults.shinc
 source aws_base.shinc
 buildCfParams
 
@@ -28,7 +27,8 @@ if [ -z ${stack+x} ]; then
     usage
 fi
 
-stackName=$app-$env-$stack
+stackName=$stack
+app=$stack
 
 updateStack $stack $stackName $env $app $cfParams $exec
 
